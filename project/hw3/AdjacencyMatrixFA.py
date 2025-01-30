@@ -207,7 +207,9 @@ class AdjacencyMatrixFA(Generic[Matrix]):
         for start in self._start_states:
             for final in self._final_states:
                 if transition_matrix[start, final]:
-                    result.append((self._num_to_state[start], self._num_to_state[final]))
+                    result.append(
+                        (self._num_to_state[start], self._num_to_state[final])
+                    )
         return result
 
     @property
@@ -226,17 +228,9 @@ class AdjacencyMatrixFA(Generic[Matrix]):
     def boolean_decomposition(self, value):
         self._adj_matrices = value
 
-    # @property
-    # def start_states(self) -> set[State]:
-    #     return {self._num_to_state[i] for i in self._start_states}
-
     @start_states.setter
     def start_states(self, value: set[State]):
         self._start_states = {self._states_to_num[state] for state in value}
-
-    # @property
-    # def final_states(self) -> set[State]:
-    #     return {self._num_to_state[i] for i in self._final_states}
 
     @final_states.setter
     def final_states(self, value: set[State]):

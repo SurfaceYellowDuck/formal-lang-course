@@ -4,7 +4,7 @@ from project.hw2.graph_to_nfa_tool import graph_to_nfa
 from itertools import product
 import networkx as nx
 import scipy.sparse as sp
-from pyformlang import rsa, cfg as pycfg
+from pyformlang import rsa
 from pyformlang.finite_automaton import NondeterministicFiniteAutomaton, State
 from typing import Set, Tuple
 
