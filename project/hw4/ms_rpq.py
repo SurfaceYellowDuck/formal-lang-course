@@ -15,8 +15,8 @@ def ms_bfs_based_rpq(
 
     fa_dim = reg_fa.states_cnt
     nfa_dim = graph_nfa.states_cnt
-    dfa_start_state_index = list(reg_fa.start_states_ind)[0]
-    nfa_start_states_indexes = graph_nfa.start_states_ind
+    dfa_start_state_index = list(reg_fa._start_states)[0]
+    nfa_start_states_indexes = graph_nfa._start_states
     nfa_start_states_cnt = len(nfa_start_states_indexes)
 
     gen_labels = (
@@ -57,8 +57,8 @@ def ms_bfs_based_rpq(
             new_front += front
         cur_front = new_front
         cur_front = cur_front > visited
-    dfa_final_states_indexes = reg_fa.final_states_ind
-    nfa_final_states_indexes = graph_nfa.final_states_ind
+    dfa_final_states_indexes = reg_fa._final_states
+    nfa_final_states_indexes = graph_nfa._final_states
     nfa_final_states_vec = create_bool_vector(
         graph_nfa.states_cnt, nfa_final_states_indexes
     )

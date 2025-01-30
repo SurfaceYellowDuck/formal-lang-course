@@ -1,237 +1,276 @@
-import itertools
-from typing import Iterable
-from pyformlang.finite_automaton import Symbol, State
-import numpy as np
-from scipy import sparse
-from pyformlang.finite_automaton import NondeterministicFiniteAutomaton
-from project.hw2.graph_to_nfa_tool import graph_to_nfa
+from collections import defaultdict
+from dataclasses import dataclass
+from itertools import product
+from typing import Iterable, List, Optional, Self, Generic, TypeVar, cast
+from networkx import MultiDiGraph
+from pyformlang.finite_automaton import NondeterministicFiniteAutomaton, State, Symbol
+import scipy.sparse as sp
+
 from project.hw2.regex_to_dfa_tool import regex_to_dfa
-from project.tools.vector_tool import create_bool_vector
-import networkx as nx
+from project.hw2.graph_to_nfa_tool import graph_to_nfa
+
+Matrix = TypeVar("Matrix")
 
 
-class AdjacencyMatrixFA:
+class AdjacencyMatrixFA(Generic[Matrix]):
+    _matrix_type: Matrix
+    _adj_matrices: dict[Symbol, Matrix]
     states_cnt: int
-    # adjacent_vertices: dict  # stores pairs of nodes that connected by an edge
-    labeled_node_numbers: dict[
-        State, int
-    ]  # stores key: value structure, key - node label, value - node index
-    numbered_node_labels: dict[int, State]
-    boolean_decomposition: dict[Symbol, sparse.csr_matrix]
-    start_states_ind: set[int]
-    final_states_ind: set[int]
-    start_states: set[State]
-    final_states: set[State]
+    _start_states: set[int]
+    _final_states: set[int]
+    _states_to_num: dict[State, int]
+    _num_to_state: List[State]
 
-    def get_idx_by_state(self, states: list[State]) -> list[int]:
-        return list(map(lambda x: self.labeled_node_numbers[x], states))
+    @staticmethod
+    def __enumerate_value(value) -> dict[State, int]:
+        return {val: idx for idx, val in enumerate(value)}
+
+    def __get_symbol_adj_matrix_dict(self, nfa) -> dict[Symbol, Matrix]:
+        symbol_state = defaultdict(
+            lambda: self._matrix_type((len(nfa.states), len(nfa.states)), dtype=bool)
+        )
+        for start_state, value in nfa.to_dict().items():
+            for symbol, end_states in value.items():
+                start_state_int = self._states_to_num[start_state]
+                if type(end_states) is State:
+                    end_states = {end_states}
+                for end_st in end_states:
+                    end_state_int = self._states_to_num[end_st]
+                    symbol_state[symbol][start_state_int, end_state_int] = True
+        return symbol_state
+
+    def __init__(
+        self,
+        nfa: Optional[NondeterministicFiniteAutomaton],
+        matrix_type: Matrix = sp.lil_matrix,
+    ):
+        self._matrix_type = matrix_type
+        self._adj_matrices = dict()
+        if nfa is None:
+            self.states_cnt = 0
+            self._start_states = set()
+            self._final_states = set()
+            return
+
+        self._states_to_num = self.__enumerate_value(nfa.states)
+        self._num_to_state = [el for el in nfa.states]
+
+        self.states_cnt = len(nfa.states)
+
+        self._start_states = set(self._states_to_num[i] for i in nfa.start_states)
+        self._final_states = set(self._states_to_num[i] for i in nfa.final_states)
+
+        self._adj_matrices = self.__get_symbol_adj_matrix_dict(nfa)
+
+    def __dfs_find_path(self, word: Iterable[Symbol]):
+        @dataclass
+        class Configuration:
+            word: List[Symbol]
+            state: int
+
+        stack = [
+            Configuration(list(word), start_state) for start_state in self._start_states
+        ]
+
+        while len(stack):
+            cur_conf = stack.pop()
+
+            if not len(cur_conf.word):
+                if cur_conf.state in self._final_states:
+                    return True
+                continue
+
+            next_symbol = cur_conf.word[0]
+            if next_symbol not in self._adj_matrices.keys():
+                continue
+
+            for i in range(self.states_cnt):
+                if self._adj_matrices[next_symbol][cur_conf.state, i]:
+                    stack.append(Configuration(cur_conf.word[1:], i))
+
+        return False
+
+    def accepts(self, word: Iterable[Symbol]) -> bool:
+        return self.__dfs_find_path(word)
+
+    def __pow_closure(self, matrix):
+        cur = matrix
+        power = 1
+        for i in range(2, self.states_cnt + 1):
+            power *= i
+            prev = cur
+            cur = sp.linalg.matrix_power(prev, i)
+            if power > self.states_cnt:
+                break
+            if prev.nnz == cur.nnz:
+                if (cur != prev).nnz == 0:
+                    break
+        return cur
+
+    def transitive_closure(self) -> Matrix:
+        if self._adj_matrices:
+            sum_matrix = cast(Matrix, sum(self._adj_matrices.values()))
+            sum_matrix.setdiag(True)
+            res = self.__pow_closure(sum_matrix)
+            return res
+        else:
+            return sp.identity(self.states_cnt)
+
+    def is_empty(self) -> bool:
+        if not self._adj_matrices:
+            return True
+        transitive_closure_matrix = self.transitive_closure()
+
+        return not any(
+            transitive_closure_matrix[s, e]
+            for s, e in product(self._start_states, self._final_states)
+        )
+
+    @classmethod
+    def from_intersect(
+        cls, automaton1: Self, automaton2: Self, matrix_type: Matrix = sp.lil_matrix
+    ):
+        instance = cls(None, matrix_type)
+        united_syms = [
+            sym
+            for sym in set(automaton1._adj_matrices.keys()).intersection(
+                automaton2._adj_matrices.keys()
+            )
+        ]
+
+        instance._adj_matrices = {
+            sym: instance._matrix_type(
+                sp.kron(automaton1._adj_matrices[sym], automaton2._adj_matrices[sym])
+            )
+            for sym in united_syms
+        }
+
+        def state_to_num(st1, st2):
+            return st1 * automaton2.states_cnt + st2
+
+        def intersect_states(states1, states2):
+            return set(state_to_num(st1, st2) for st1, st2 in product(states1, states2))
+
+        instance._states_to_num = {
+            State((st1[0], st2[0])): state_to_num(st1[1], st2[1])
+            for st1, st2 in product(
+                automaton1._states_to_num.items(), automaton2._states_to_num.items()
+            )
+        }
+        instance._num_to_state = [
+            State(el)
+            for el in product(automaton1._num_to_state, automaton2._num_to_state)
+        ]
+
+        instance._start_states = intersect_states(
+            automaton1._start_states, automaton2._start_states
+        )
+        instance._final_states = intersect_states(
+            automaton1._final_states, automaton2._final_states
+        )
+        instance.states_cnt = automaton1.states_cnt * automaton2.states_cnt
+        return instance
 
     def get_state_by_idx(self, ids: list[int]) -> list[State]:
         return list(map(lambda x: self.numbered_node_labels[x], ids))
 
-    def __init__(self, fa: NondeterministicFiniteAutomaton = None):
-        self.boolean_decomposition = {}
-        self.start_states_ind = set()
-        self.final_states_ind = set()
-        self.labeled_node_numbers = {}
-        self.numbered_node_labels = {}
-        self.start_states = set()
-        self.final_states = set()
+    def get_idx_by_state(self, states: list[State]) -> list[int]:
+        return list(map(lambda x: self.labeled_node_numbers[x], states))
 
-        if fa is None:
-            self.states_cnt = 0
-            return
+    @property
+    def states_number(self):
+        return self.states_cnt
 
-        self.states_cnt = len(fa.states)
+    @property
+    def start_states(self):
+        return self._start_states
 
-        for ind, state in enumerate(fa.states, 0):
-            self.labeled_node_numbers[state] = ind
-            self.numbered_node_labels[ind] = state
+    @property
+    def final_states(self):
+        return self._final_states
 
-        for start_state in fa.start_states:
-            self.start_states_ind.add(self.labeled_node_numbers[start_state])
-            self.start_states.add(start_state)
+    @property
+    def states_to_num(self):
+        return self._states_to_num
 
-        for final_state in fa.final_states:
-            self.final_states_ind.add(self.labeled_node_numbers[final_state])
-            self.final_states.add(final_state)
+    @property
+    def adj_matrices(self):
+        return self._adj_matrices
 
-        graph = fa.to_networkx()
-        edges = graph.edges(data="label")
-
-        nodes_connectivity = {}
-        labels = set()
-
-        for edge in edges:
-            u = edge[0]
-            v = edge[1]
-            label = edge[2]
-            # assert isinstance(label, Symbol)
-            if label is not None:
-                nodes_connectivity.setdefault(label, []).append((u, v))
-                labels.add(label)
-
-        for label in labels:
-            data = np.ones(len(nodes_connectivity[label]), dtype=bool)
-            rows = list(
-                map(
-                    lambda conn: self.labeled_node_numbers[conn[0]],
-                    nodes_connectivity[label],
-                )
-            )
-            columns = list(
-                map(
-                    lambda conn: self.labeled_node_numbers[conn[1]],
-                    nodes_connectivity[label],
-                )
-            )
-
-            decomposed_matrix = sparse.csr_matrix(
-                (data, (rows, columns)),
-                shape=(self.states_cnt, self.states_cnt),
-            )
-
-            self.boolean_decomposition[label] = decomposed_matrix
-
-    def transitive_closure(self):
-        transitive_closure = sparse.csr_matrix(
-            (
-                np.ones(self.states_cnt, dtype=bool),
-                (range(self.states_cnt), range(self.states_cnt)),
-            ),
-            shape=(self.states_cnt, self.states_cnt),
-        )
-
-        for matrix in self.boolean_decomposition.values():
-            transitive_closure = matrix + transitive_closure
-
-        transitive_closure_matrix = transitive_closure ** (self.states_cnt - 1)
-
-        return transitive_closure_matrix.tocsr()
-
-    def accepts(self, word: Iterable[Symbol]) -> bool:
-        states_ind_vector = create_bool_vector(self.states_cnt, self.start_states_ind)
-
-        for symbol in word:
-            states_ind_vector = states_ind_vector @ self.boolean_decomposition[symbol]
-
-        final_states_ind_vector = create_bool_vector(
-            self.states_cnt, self.final_states_ind
-        )
-
-        return np.any(states_ind_vector & final_states_ind_vector)
-
-    # def get_state_to_idx(self, states: list[State]) -> list[int]:
-    #     return list(map(lambda x: self.labeled_node_numbers[x], states))
+    @property
+    def num_to_state(self):
+        return self._num_to_state
 
     def get_start_and_final(self) -> list[tuple[State, State]]:
         transition_matrix = self.transitive_closure()
-        start_ids = self.get_idx_by_state(list(self.start_states))
-        final_ids = self.get_idx_by_state(list(self.final_states))
-        return [
-            (self.numbered_node_labels[start], self.numbered_node_labels[final])
-            for start in start_ids
-            for final in final_ids
-            if transition_matrix[start, final]
-        ]
+        result = []
+        for start in self._start_states:
+            for final in self._final_states:
+                if transition_matrix[start, final]:
+                    result.append((self._num_to_state[start], self._num_to_state[final]))
+        return result
 
-    def is_empty(self) -> bool:
-        states_ones = create_bool_vector(self.states_cnt, self.start_states_ind)
+    @property
+    def labeled_node_numbers(self):
+        return self._states_to_num
 
-        transitive_closure_matrix = self.transitive_closure()
+    @property
+    def numbered_node_labels(self):
+        return {i: state for i, state in enumerate(self._num_to_state)}
 
-        states_ind_vector = states_ones @ transitive_closure_matrix
+    @property
+    def boolean_decomposition(self):
+        return self._adj_matrices
 
-        final_states_ind_vector = create_bool_vector(
-            self.states_cnt, self.final_states_ind
-        )
+    @boolean_decomposition.setter
+    def boolean_decomposition(self, value):
+        self._adj_matrices = value
 
-        return not np.any(states_ind_vector & final_states_ind_vector)
+    # @property
+    # def start_states(self) -> set[State]:
+    #     return {self._num_to_state[i] for i in self._start_states}
+
+    @start_states.setter
+    def start_states(self, value: set[State]):
+        self._start_states = {self._states_to_num[state] for state in value}
+
+    # @property
+    # def final_states(self) -> set[State]:
+    #     return {self._num_to_state[i] for i in self._final_states}
+
+    @final_states.setter
+    def final_states(self, value: set[State]):
+        self._final_states = {self._states_to_num[state] for state in value}
 
 
 def intersect_automata(
     automaton1: AdjacencyMatrixFA, automaton2: AdjacencyMatrixFA
 ) -> AdjacencyMatrixFA:
-    fa1_dim = automaton1.states_cnt
-    fa2_dim = automaton2.states_cnt
-
-    new_states = [
-        State(
-            (
-                automaton1.numbered_node_labels[ind1].value,
-                automaton2.numbered_node_labels[ind2].value,
-            )
-        )
-        for ind1 in range(fa1_dim)
-        for ind2 in range(fa2_dim)
-    ]
-
-    new_ind_to_state = {state: ind for (state, ind) in enumerate(new_states)}
-    new_state_to_ind = {ind: state for (state, ind) in enumerate(new_states)}
-    kron_labels = (
-        automaton1.boolean_decomposition.keys()
-        & automaton2.boolean_decomposition.keys()
-    )
-
-    inter_boolean_decomposition_matrices = {}
-
-    for label in kron_labels:
-        inter_boolean_decomposition_matrices[label] = sparse.kron(
-            automaton1.boolean_decomposition[label],
-            automaton2.boolean_decomposition[label],
-        )
-    new_start_states = set(
-        itertools.product(
-            map(lambda x: x.value, automaton1.start_states),
-            map(lambda x: x.value, automaton2.start_states),
-        )
-    )
-    new_start_states_ind = set(
-        map(lambda state: new_state_to_ind[state], new_start_states)
-    )
-
-    new_final_states = set(
-        itertools.product(
-            map(lambda x: x.value, automaton1.final_states),
-            map(lambda x: x.value, automaton2.final_states),
-        )
-    )
-    new_final_states_ind = set(
-        map(lambda state: new_state_to_ind[state], new_final_states)
-    )
-
-    for symb in kron_labels:
-        inter_boolean_decomposition_matrices[symb] = sparse.kron(
-            automaton1.boolean_decomposition[symb],
-            automaton2.boolean_decomposition[symb],
-        ).tocsr()
-    adjacency_matrix_fa = AdjacencyMatrixFA()
-    adjacency_matrix_fa.states_cnt = fa1_dim * fa2_dim
-    adjacency_matrix_fa.boolean_decomposition = inter_boolean_decomposition_matrices
-    adjacency_matrix_fa.start_states = new_start_states
-    adjacency_matrix_fa.final_states = new_final_states
-
-    adjacency_matrix_fa.start_states_ind = new_start_states_ind
-    adjacency_matrix_fa.final_states_ind = new_final_states_ind
-    adjacency_matrix_fa.labeled_node_numbers = new_state_to_ind
-    adjacency_matrix_fa.numbered_node_labels = new_ind_to_state
-    return adjacency_matrix_fa
+    return AdjacencyMatrixFA.from_intersect(automaton1, automaton2)
 
 
 def tensor_based_rpq(
-    regex: str, graph: nx.MultiDiGraph, start_nodes: set[int], final_nodes: set[int]
+    regex: str,
+    graph: MultiDiGraph,
+    start_nodes: set[int],
+    final_nodes: set[int],
+    matrix_type=sp.lil_matrix,
 ) -> set[tuple[int, int]]:
     regex_dfa = regex_to_dfa(regex)
-    regex_adjacency_matrix_fa = AdjacencyMatrixFA(regex_dfa)
-
+    adj_regex = AdjacencyMatrixFA(regex_dfa, matrix_type)
     graph_nfa = graph_to_nfa(graph, start_nodes, final_nodes)
-    graph_adjacency_matrix_fa = AdjacencyMatrixFA(graph_nfa)
+    adj_graph = AdjacencyMatrixFA(graph_nfa, matrix_type)
+    adj_intersect = AdjacencyMatrixFA.from_intersect(adj_graph, adj_regex, matrix_type)
 
-    intersect = intersect_automata(graph_adjacency_matrix_fa, regex_adjacency_matrix_fa)
+    adj_closure = adj_intersect.transitive_closure()
 
-    rpq_answer = tuple(zip(*intersect.get_start_and_final()))
-    rpq_start_states, rpq_final_states = ([], []) if not rpq_answer else rpq_answer
+    result = {
+        (
+            adj_intersect.num_to_state[start].value[0],
+            adj_intersect.num_to_state[final].value[0],
+        )
+        for start, final in zip(*adj_closure.nonzero())
+        if start in adj_intersect.start_states and final in adj_intersect.final_states
+    }
 
-    rpq_start_state_values = list(map(lambda x: x.value[0], rpq_start_states))
-    rpq_final_state_values = list(map(lambda x: x.value[0], rpq_final_states))
-    return set(zip(rpq_start_state_values, rpq_final_state_values))
+    return result

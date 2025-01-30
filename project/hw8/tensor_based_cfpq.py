@@ -1,91 +1,90 @@
-import itertools
-from typing import Dict
-
-import pyformlang
-from pyformlang.finite_automaton import Symbol, State
-import networkx as nx
-from project.tools.rsm_tools import (
-    rsm_to_nfa,
-)
 from project.hw3.AdjacencyMatrixFA import AdjacencyMatrixFA, intersect_automata
 from project.hw2.graph_to_nfa_tool import graph_to_nfa
-from scipy import sparse
+
+from itertools import product
+import networkx as nx
+import scipy.sparse as sp
+from pyformlang import rsa, cfg as pycfg
+from pyformlang.finite_automaton import NondeterministicFiniteAutomaton, State
+from typing import Set, Tuple
+
+
+def bool_decomposed_rsm(rsm: rsa.RecursiveAutomaton) -> AdjacencyMatrixFA:
+    nfa = NondeterministicFiniteAutomaton()
+
+    for nonterminal, box in rsm.boxes.items():
+        box_dfa = box.dfa
+
+        for s in box_dfa.final_states | box_dfa.start_states:
+            if s in box_dfa.start_states:
+                nfa.add_start_state(State((nonterminal, s)))
+            if s in box_dfa.final_states:
+                nfa.add_final_state(State((nonterminal, s)))
+
+        for edge in box_dfa.to_networkx().edges(data="label"):
+            nfa.add_transition(
+                State((nonterminal, edge[0])), edge[2], State((nonterminal, edge[1]))
+            )
+
+    return AdjacencyMatrixFA(nfa)
+
+
+def __compute_closure(decomposed_rsa, decomposed_graph, rsm):
+    last_nonzero_number = 0
+    current_nonzero_number = None
+
+    while last_nonzero_number != current_nonzero_number:
+        last_nonzero_number = current_nonzero_number
+        intersection = intersect_automata(decomposed_rsa, decomposed_graph)
+
+        transitive_closure = intersection.transitive_closure()
+
+        for row_index, column_index in zip(*transitive_closure.nonzero()):
+            row_state = intersection.num_to_state[row_index]
+            column_state = intersection.num_to_state[column_index]
+
+            row_inside_state, row_graph_state = row_state.value
+            row_symbol, row_rsm_state = row_inside_state.value
+            column_inside_state, column_graph_state = column_state.value
+            column_symbol, column_rsm_state = column_inside_state.value
+
+            if (
+                row_symbol == column_symbol
+                and row_rsm_state in rsm.boxes[row_symbol].dfa.start_states
+                and column_rsm_state in rsm.boxes[row_symbol].dfa.final_states
+            ):
+                row_graph_index = decomposed_graph.states_to_num[row_graph_state]
+                column_graph_index = decomposed_graph.states_to_num[column_graph_state]
+
+                decomposed_graph.adj_matrices[row_symbol][
+                    row_graph_index, column_graph_index
+                ] = True
+
+        current_nonzero_number = sum(
+            decomposed_graph.adj_matrices[nonterminal].count_nonzero()
+            for nonterminal in decomposed_graph.adj_matrices
+        )
 
 
 def tensor_based_cfpq(
-    rsm: pyformlang.rsa.RecursiveAutomaton,
+    rsm: rsa.RecursiveAutomaton,
     graph: nx.DiGraph,
-    start_nodes: set[int] = None,
-    final_nodes: set[int] = None,
-) -> set[tuple[int, int]]:
-    rsm_fa = rsm_to_nfa(rsm)
-    rsm_adj = AdjacencyMatrixFA(rsm_fa)
+    start_nodes: Set[int] | None = None,
+    final_nodes: Set[int] | None = None,
+    matrix_type=sp.csr_matrix,
+) -> Set[Tuple[int, int]]:
+    decomposed_rsa = bool_decomposed_rsm(rsm)
+    decomposed_graph = AdjacencyMatrixFA(
+        graph_to_nfa(graph, start_nodes, final_nodes), matrix_type=matrix_type
+    )
 
-    graph = nx.MultiDiGraph(graph)
-    graph_fa = graph_to_nfa(graph, start_nodes, final_nodes)
-    graph_adj = AdjacencyMatrixFA(graph_fa)
+    __compute_closure(decomposed_rsa, decomposed_graph, rsm)
 
-    def delta(
-        tc: sparse.csr_matrix, intersection_: AdjacencyMatrixFA
-    ) -> Dict[Symbol, sparse.csr_matrix]:
-        res: dict[Symbol, sparse.csr_matrix] = {}
-
-        for ind_from, ind_to in zip(*tc.nonzero()):
-            kron_state_start_st, kron_state_fin_st = intersection_.get_state_by_idx(
-                [ind_from, ind_to]
-            )
-            gr_start_st, rsm_start_st = (
-                State(kron_state_start_st.value[0]),
-                State(kron_state_start_st.value[1]),
-            )
-            gr_fin_st, rsm_fin_st = (
-                State(kron_state_fin_st.value[0]),
-                State(kron_state_fin_st.value[1]),
-            )
-
-            gr_start_ind, gr_fin_ind = graph_adj.get_idx_by_state(
-                [gr_start_st, gr_fin_st]
-            )
-            assert rsm_start_st.value[0] == rsm_fin_st.value[0]
-            if not (
-                (rsm_start_st in rsm_adj.start_states)
-                and (rsm_fin_st in rsm_adj.final_states)
-            ):
-                continue
-
-            label = rsm_start_st.value[0]
-            size = graph_adj.states_cnt
-            if (
-                label not in graph_adj.boolean_decomposition
-                or not graph_adj.boolean_decomposition[label][gr_start_ind, gr_fin_ind]
-            ):
-                res.setdefault(label, sparse.csr_matrix((size, size), dtype=bool))[
-                    gr_start_ind, gr_fin_ind
-                ] = True
-        return res
-
-    while True:
-        intersection_automatas = intersect_automata(graph_adj, rsm_adj)
-        tc = intersection_automatas.transitive_closure()
-        delta_ = delta(tc, intersection_automatas)
-
-        if not delta_:
-            break
-        for lab, matr in delta_.items():
-            if lab in graph_adj.boolean_decomposition:
-                graph_adj.boolean_decomposition[lab] += matr
-            else:
-                graph_adj.boolean_decomposition[lab] = matr
-
-    start_symb = rsm.initial_label
-    if start_symb in graph_adj.boolean_decomposition:
-        start_m = graph_adj.boolean_decomposition[start_symb]
-        return {
-            (start, final)
-            for (start, final) in itertools.product(start_nodes, final_nodes)
-            if start_m[
-                graph_adj.labeled_node_numbers[State(start)],
-                graph_adj.labeled_node_numbers[State(final)],
-            ]
-        }
-    return set()
+    answer = {
+        (decomposed_graph.num_to_state[n], decomposed_graph.num_to_state[m])
+        for n, m in product(
+            decomposed_graph.start_states, decomposed_graph.final_states
+        )
+        if decomposed_graph.adj_matrices[rsm.initial_label][n, m]
+    }
+    return answer
